@@ -1,0 +1,17 @@
+[project]
+name = "sphereembedding"
+version = "0.1.0"
+description = "Spherical coordinate embedding model with distillation for edge RAG"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "transformers>=4.30.0",
+    "sentence-transformers>=2.2.2",
+    "datasets>=2.14.0",
+    "scikit-learn>=1.3.0",
+    "numpy>=1.24.0",
+    "matplotlib>=3.7.0",
+    "faiss-cpu>=1.7.4",
+]
+
