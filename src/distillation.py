@@ -359,7 +359,10 @@ class DistillationTrainer:
     ):
         label_cache = None
         optimizer_params = (
+            list(self.student_model.input_projection.parameters()) +
             list(self.student_model.encoder.parameters()) +
+            list(self.student_model.radius_head.parameters()) +
+            list(self.student_model.angle_head.parameters()) +
             list(self.student_model.decoder.parameters())
         )
         if labels is not None:

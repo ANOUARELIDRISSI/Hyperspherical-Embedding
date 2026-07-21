@@ -14,7 +14,8 @@ Chunked dual-FAISS benchmark:
 | Initial 3D smoke checkpoint | 0.467 | 0.569 |
 | Pairwise + supervised topics | 0.717 | 0.781 |
 | Retrieval distillation + mined negatives | 0.817 | 0.883 |
+| Residual separate-head encoder + retrieval distillation | 0.967 | 1.000 |
 | Longer retrieval run, 256 sentences | 0.725 | 0.743 |
 | Retrieval distillation + prototype loss | 0.692 | 0.719 |
 
-Takeaway: teacher top-k neighborhoods, listwise KL ranking, and mined hard negatives gave the best 3D retrieval quality. Prototype loss is implemented but was not beneficial in the compact test.
+Takeaway: teacher top-k neighborhoods, listwise KL ranking, mined hard negatives, and a stronger residual encoder with separate radius/angle heads gave the best 3D retrieval quality. Prototype loss is implemented but was not beneficial in the compact test.
