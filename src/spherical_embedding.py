@@ -88,7 +88,7 @@ class SphericalEmbeddingModel(nn.Module):
     @classmethod
     def from_pretrained(cls, path, model_name=None):
         """Load model from saved weights"""
-        checkpoint = torch.load(path, weights_only=True)
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
         if model_name is None:
             model_name = checkpoint['base_model_name']
         model = cls(model_name=model_name)
