@@ -1,0 +1,134 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{microtype}
+
+\title{Retrieval-Focused Distillation for 3D Hyperspherical Embeddings}
+\author{SphereEmbedding Experiments}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note studies whether a sentence embedding model can be distilled from a 384-dimensional MiniLM teacher into a compact 3D spherical representation for retrieval-augmented generation. A naive pairwise distillation objective produced severe semantic collisions in chunked FAISS retrieval. We improved the 3D student by training it as a retrieval ranking model: teacher top-$k$ neighborhoods define the desired local structure, listwise KL divergence transfers ranking distributions, and student-mined hard negatives target collisions found in the 3D space. On a controlled chunked topic benchmark, the best compact run improved spherical retrieval from $P@5=0.467$ to $P@5=0.817$, while the 384D teacher remained at $P@5=1.000$.
+\end{abstract}
+
+\section{Motivation}
+Embedding vectors are often large enough to be awkward on constrained devices. The MiniLM sentence-transformer used here emits 384-dimensional vectors. A 3D representation is dramatically smaller and can be visualized directly, but global semantic compression into three coordinates creates an obvious risk: unrelated meanings can collide.
+
+The goal is not to prove that 3D can replace a full embedding model for all retrieval tasks. Instead, the experiment asks a narrower question:
+
+\begin{quote}
+How much retrieval structure can be preserved when a 384D teacher is distilled into a flexible 3D spherical student?
+\end{quote}
+
+The student predicts spherical coordinates $(r,\theta,\phi)$ and converts them to Cartesian coordinates:
+\begin{align}
+x &= r\sin(\theta)\cos(\phi),\\
+y &= r\sin(\theta)\sin(\phi),\\
+z &= r\cos(\theta).
+\end{align}
+Radius is kept flexible rather than forced to $r=1$, so the model can potentially use angle for coarse semantics and radius for specificity or confidence.
+
+\section{Problem With Naive Distillation}
+The initial training objective distilled pairwise similarities from MiniLM into the 3D student. This helped slightly, but qualitative retrieval showed large topic collisions. For example, business queries could retrieve travel or entertainment chunks, and education queries could retrieve science chunks.
+
+The core issue is capacity. A 3D space has infinitely many points, but only a few independent degrees of freedom. Therefore, a successful 3D student must learn the retrieval decisions that matter most, not the entire 384D geometry.
+
+\section{Retrieval-Focused Distillation}
+The improved objective changes the target from ``copy the teacher embedding space'' to ``copy the teacher retrieval ranking.''
+
+\subsection{Teacher Top-$k$ Neighborhoods}
+First, frozen MiniLM embeddings are precomputed for all training texts. For each anchor $i$, cosine similarity in teacher space identifies the top-$k$ teacher neighbors:
+\[
+\mathcal{N}_k(i) = \operatorname{TopK}_{j\ne i}
+\left(
+\cos(t_i,t_j)
+\right).
+\]
+These neighbors form the positive candidate set for retrieval distillation.
+
+\subsection{Listwise KL Ranking Loss}
+For an anchor and a candidate set, the teacher and student each produce a similarity distribution:
+\begin{align}
+p_T(j|i) &= \operatorname{softmax}\left(\frac{\cos(t_i,t_j)}{\tau}\right),\\
+p_S(j|i) &= \operatorname{softmax}\left(\frac{\cos(s_i,s_j)}{\tau}\right).
+\end{align}
+The student minimizes:
+\[
+\mathcal{L}_{rank} =
+D_{\mathrm{KL}}\left(p_T(\cdot|i)\;\|\;p_S(\cdot|i)\right).
+\]
+This objective is better aligned with RAG than scalar pair matching because retrieval depends on relative ranking.
+
+\subsection{Mined Student Hard Negatives}
+After each epoch, the current 3D student retrieves its nearest neighbors. If examples from other topics are too close to the anchor, they are inserted into the next epoch's candidate set as hard negatives. This directly attacks the observed failure mode: collisions inside the 3D space.
+
+\subsection{Optional Topic Prototype Loss}
+An optional prototype loss was also implemented. Each topic receives a learned 3D prototype, and examples are encouraged to classify against those prototypes. In compact tests, this made results worse, likely because the prototype objective over-constrained the tiny 3D space. It remains useful for future ablations, but the best observed run did not use it.
+
+\section{Chunked RAG Benchmark}
+The evaluation builds two FAISS indexes over the same chunked documents:
+\begin{itemize}
+\item a 384D MiniLM teacher index;
+\item a 3D spherical student index.
+\end{itemize}
+Documents are grouped by topic, chunked with overlap, and queried with topic-level prompts. A retrieval is counted as correct when the returned chunk label matches the query topic. The main metrics are precision at 5 and mean reciprocal rank.
+
+\section{Results}
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Method & Precision@5 & MRR \\
+\midrule
+384D MiniLM teacher & 1.000 & 1.000 \\
+Initial 3D smoke checkpoint & 0.467 & 0.569 \\
+Pairwise + supervised topics & 0.717 & 0.781 \\
+Retrieval distillation + mined negatives & \textbf{0.817} & \textbf{0.883} \\
+Longer retrieval run, 256 sentences & 0.725 & 0.743 \\
+Retrieval distillation + prototype loss & 0.692 & 0.719 \\
+\bottomrule
+\end{tabular}
+\caption{Chunked dual-FAISS benchmark. The best 3D result used teacher top-$k$ neighborhoods, listwise KL ranking, topic supervision, and mined hard negatives, without prototype loss.}
+\end{table}
+
+The best compact command was:
+\begin{verbatim}
+uv run python -u train.py --sentences 160 --epochs 12 --batch-size 16 \
+  --pairs-per-epoch 256 --threads 7 --skip-rag-test --supervised-topics \
+  --retrieval-distillation --teacher-top-k 8 --mined-hard-negatives
+\end{verbatim}
+
+\section{Discussion}
+The results support three conclusions.
+
+First, the vector database was not the main bottleneck. FAISS over normalized 3D vectors was sufficient to expose whether the geometry was useful. The failures came from semantic collisions in the representation.
+
+Second, retrieval-focused distillation is substantially better than naive pairwise distillation for a very small student. The jump from $P@5=0.467$ to $P@5=0.817$ suggests that the student should be trained for ranking behavior, not full teacher reconstruction.
+
+Third, longer training is not automatically better. A longer run on 256 sentences reduced the training loss but lowered benchmark quality. This suggests the global 3D space can overfit or rotate topic clusters in ways that look good to the training loss but hurt held-out chunked retrieval.
+
+\section{Limitations}
+This is still a controlled synthetic benchmark. The teacher reaches perfect performance, so the benchmark is useful for debugging the student but not sufficient for publication-level generality. The next step should test real corpora and compare against dimensionality-reduction baselines such as PCA or random projection.
+
+The 3D space also still misses some query types. Even the best run has collisions, especially for broad or mixed queries. This is expected from the small number of degrees of freedom.
+
+\section{Future Work}
+Promising next directions include:
+\begin{itemize}
+\item early stopping on the chunked benchmark rather than training loss;
+\item curriculum hard-negative mining that ramps up collision difficulty;
+\item routed multi-sphere retrieval, where a coarse router selects a local 3D sphere;
+\item comparison with 8D, 16D, and 32D hyperspherical students;
+\item real-world datasets with paraphrased queries and relevance labels.
+\end{itemize}
+
+\section{Conclusion}
+The experiment does not show that a single global 3D spherical embedding can replace a 384D sentence embedding. It does show that careful retrieval-focused distillation can make 3D retrieval far more accurate than naive distillation. The most interesting claim is therefore modest but useful: a tiny spherical student can preserve a surprising amount of teacher retrieval behavior when trained directly on teacher neighborhoods and student-mined collisions.
+
+\end{document}

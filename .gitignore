@@ -13,3 +13,8 @@ wheels/
 
 # Local training artifacts
 models/
+
+# LaTeX build byproducts
+*.aux
+*.log
+*.out
