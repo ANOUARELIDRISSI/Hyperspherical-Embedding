@@ -24,6 +24,7 @@ class DistillationTrainer:
         self.device = torch.device(device)
         self.student_model = SphericalEmbeddingModel(model_name=teacher_model_name).to(self.device)
         self.eval_texts = None
+        self.topic_classifier = None
         
     def set_eval_texts(self, texts):
         """Set texts to use for evaluation during training"""
@@ -94,9 +95,14 @@ class DistillationTrainer:
         distances, indices = neighbors.kneighbors(text_features, return_distance=True)
         return distances, indices
 
-    def generate_pairs(self, texts, pair_index, num_pairs_per_epoch=10000):
+    def generate_pairs(self, texts, pair_index, num_pairs_per_epoch=10000, labels=None):
         """Generate semantic training pairs from a precomputed nearest-neighbor graph."""
         distances, indices = pair_index
+        label_to_indices = None
+        if labels is not None:
+            label_to_indices = {}
+            for idx, label in enumerate(labels):
+                label_to_indices.setdefault(label, []).append(idx)
 
         pairs = []
         num_texts = len(texts)
@@ -106,14 +112,23 @@ class DistillationTrainer:
             anchor = texts[anchor_idx]
 
             nearest = [idx for idx in indices[anchor_idx] if idx != anchor_idx]
-            positive_idx = random.choice(nearest[: max(1, min(5, len(nearest)))])
+            if label_to_indices is not None and random.random() < 0.7:
+                same_label = [idx for idx in label_to_indices[labels[anchor_idx]] if idx != anchor_idx]
+                positive_idx = random.choice(same_label or nearest[: max(1, min(5, len(nearest)))])
+            else:
+                positive_idx = random.choice(nearest[: max(1, min(5, len(nearest)))])
             positive = texts[positive_idx]
 
             far_neighbors = [
                 idx for dist, idx in zip(distances[anchor_idx], indices[anchor_idx])
                 if idx != anchor_idx and idx != positive_idx and dist > 0.35
             ]
-            hard_neg_idx = random.choice(far_neighbors or nearest[-max(1, len(nearest) // 3):])
+            if label_to_indices is not None and random.random() < 0.7:
+                other_labels = [label for label in label_to_indices if label != labels[anchor_idx]]
+                neg_label = random.choice(other_labels)
+                hard_neg_idx = random.choice(label_to_indices[neg_label])
+            else:
+                hard_neg_idx = random.choice(far_neighbors or nearest[-max(1, len(nearest) // 3):])
             hard_neg = texts[hard_neg_idx]
 
             rand_neg_idx = random.randint(0, num_texts - 1)
@@ -134,7 +149,7 @@ class DistillationTrainer:
                 embeddings.append(self.student_model.encode_base_embeddings(batch).cpu())
         return torch.cat(embeddings, dim=0).to(self.device)
         
-    def train_step(self, batch_pairs, base_embedding_cache, optimizer):
+    def train_step(self, batch_pairs, base_embedding_cache, optimizer, label_cache=None):
         self.student_model.train()
         optimizer.zero_grad()
 
@@ -193,6 +208,10 @@ class DistillationTrainer:
             + F.relu(margin - spherical_pos_sim + spherical_rand_neg_sim).mean()
         )
         spread_loss = F.relu(0.25 - flat_spherical.std(dim=0)).mean()
+        supervised_loss = torch.tensor(0.0, device=self.device)
+        if label_cache is not None and self.topic_classifier is not None:
+            label_targets = label_cache.index_select(0, batch_indices)
+            supervised_loss = F.cross_entropy(self.topic_classifier(flat_spherical), label_targets)
         total_loss = (
             0.5 * recon_loss
             + 0.5 * recon_matrix_loss
@@ -201,6 +220,7 @@ class DistillationTrainer:
             + 4.0 * matrix_loss
             + rank_loss
             + 0.1 * spread_loss
+            + 0.25 * supervised_loss
         )
         
         # Compute average teacher cosine similarity
@@ -212,10 +232,22 @@ class DistillationTrainer:
         
         return total_loss.item(), avg_teacher_cosine.item()
     
-    def train(self, texts, num_epochs=50, learning_rate=1e-3, batch_size=32, pair_workers=-1, pairs_per_epoch=None):
+    def train(self, texts, num_epochs=50, learning_rate=1e-3, batch_size=32, pair_workers=-1, pairs_per_epoch=None, labels=None):
+        label_cache = None
+        optimizer_params = (
+            list(self.student_model.encoder.parameters()) +
+            list(self.student_model.decoder.parameters())
+        )
+        if labels is not None:
+            label_names = sorted(set(labels))
+            label_to_id = {label: idx for idx, label in enumerate(label_names)}
+            label_cache = torch.tensor([label_to_id[label] for label in labels], dtype=torch.long, device=self.device)
+            self.topic_classifier = nn.Linear(3, len(label_names)).to(self.device)
+            optimizer_params += list(self.topic_classifier.parameters())
+            print(f"Using supervised topic separation with {len(label_names)} labels")
+
         optimizer = torch.optim.Adam(
-            list(self.student_model.encoder.parameters()) + 
-            list(self.student_model.decoder.parameters()),
+            optimizer_params,
             lr=learning_rate
         )
         
@@ -232,7 +264,7 @@ class DistillationTrainer:
             if epoch == 0:
                 print("Building semantic pair index...")
                 pair_index = self.build_pair_index(texts, n_jobs=pair_workers)
-            training_pairs = self.generate_pairs(texts, pair_index, num_pairs_per_epoch=num_pairs)
+            training_pairs = self.generate_pairs(texts, pair_index, num_pairs_per_epoch=num_pairs, labels=labels)
             
             total_loss = 0.0
             total_teacher_cosine = 0.0
@@ -240,7 +272,7 @@ class DistillationTrainer:
             
             for i in range(0, len(training_pairs), batch_size):
                 batch_pairs = training_pairs[i:i+batch_size]
-                loss, teacher_cosine = self.train_step(batch_pairs, base_embedding_cache, optimizer)
+                loss, teacher_cosine = self.train_step(batch_pairs, base_embedding_cache, optimizer, label_cache=label_cache)
                 total_loss += loss
                 total_teacher_cosine += teacher_cosine
                 num_batches += 1

@@ -57,6 +57,11 @@ Useful training options:
 uv run python train.py --sentences 10000 --epochs 10 --batch-size 64 --pairs-per-epoch 10000 --skip-rag-test
 ```
 
+Train the 3D model with labeled topic separation:
+```bash
+uv run python train.py --sentences 128 --epochs 14 --batch-size 32 --pairs-per-epoch 512 --skip-rag-test --supervised-topics
+```
+
 ## Notes
 - Training now mines positives and hard negatives with TF-IDF nearest neighbors instead of using random adjacent sentences.
 - The frozen MiniLM base model is reused as the teacher signal during each student forward pass, avoiding a second teacher encode per batch.

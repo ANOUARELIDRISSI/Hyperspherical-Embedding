@@ -1,7 +1,7 @@
 import argparse
 import os
 
-from src.real_data_loader import load_real_corpus
+from src.real_data_loader import load_labeled_corpus, load_real_corpus
 from src.distillation import DistillationTrainer
 from src.spherical_embedding import SphericalEmbeddingModel
 from src.rag import RAGSystem
@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--pair-workers", type=int, default=-1)
     parser.add_argument("--pairs-per-epoch", type=int, default=None)
     parser.add_argument("--skip-rag-test", action="store_true")
+    parser.add_argument("--supervised-topics", action="store_true")
     args = parser.parse_args()
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 
@@ -26,7 +27,13 @@ def main():
     
     # Step 1: Load real-world corpus
     print("\n1. Loading training corpus...")
-    training_texts = load_real_corpus(total_sentences=args.sentences)
+    labels = None
+    if args.supervised_topics:
+        training_records = load_labeled_corpus(total_sentences=args.sentences)
+        training_texts = [record["text"] for record in training_records]
+        labels = [record["label"] for record in training_records]
+    else:
+        training_texts = load_real_corpus(total_sentences=args.sentences)
     print(f"Loaded {len(training_texts)} training sentences")
     
     # Step 2: Initialize trainer
@@ -42,6 +49,7 @@ def main():
         learning_rate=args.learning_rate,
         pair_workers=args.pair_workers,
         pairs_per_epoch=args.pairs_per_epoch,
+        labels=labels,
     )
     
     # Step 4: Save model
