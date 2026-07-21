@@ -67,6 +67,13 @@ Longer supervised run with checkpoints:
 uv run python train.py --sentences 512 --epochs 40 --batch-size 64 --pairs-per-epoch 1024 --threads 7 --pair-workers -1 --skip-rag-test --supervised-topics --checkpoint-dir models/checkpoints --checkpoint-every 10
 ```
 
+Train 3D as a retrieval ranking model with teacher top-k neighborhoods and mined hard negatives:
+```bash
+uv run python train.py --sentences 256 --epochs 30 --batch-size 32 --pairs-per-epoch 512 --threads 7 --skip-rag-test --supervised-topics --retrieval-distillation --teacher-top-k 8 --mined-hard-negatives
+```
+
+`--prototype-loss` is available for experiments, but the best observed compact run did not use it.
+
 ## Notes
 - Training now mines positives and hard negatives with TF-IDF nearest neighbors instead of using random adjacent sentences.
 - The frozen MiniLM base model is reused as the teacher signal during each student forward pass, avoiding a second teacher encode per batch.

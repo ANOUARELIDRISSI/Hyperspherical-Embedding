@@ -20,6 +20,10 @@ def main():
     parser.add_argument("--supervised-topics", action="store_true")
     parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--checkpoint-every", type=int, default=0)
+    parser.add_argument("--retrieval-distillation", action="store_true")
+    parser.add_argument("--teacher-top-k", type=int, default=8)
+    parser.add_argument("--mined-hard-negatives", action="store_true")
+    parser.add_argument("--prototype-loss", action="store_true")
     args = parser.parse_args()
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 
@@ -54,6 +58,10 @@ def main():
         labels=labels,
         checkpoint_dir=args.checkpoint_dir,
         checkpoint_every=args.checkpoint_every,
+        retrieval_distillation=args.retrieval_distillation,
+        teacher_top_k=args.teacher_top_k,
+        mined_hard_negatives=args.mined_hard_negatives,
+        prototype_loss=args.prototype_loss,
     )
     if history:
         best = min(history, key=lambda item: item["loss"])

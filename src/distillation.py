@@ -25,6 +25,7 @@ class DistillationTrainer:
         self.student_model = SphericalEmbeddingModel(model_name=teacher_model_name).to(self.device)
         self.eval_texts = None
         self.topic_classifier = None
+        self.topic_prototypes = None
         
     def set_eval_texts(self, texts):
         """Set texts to use for evaluation during training"""
@@ -148,6 +149,55 @@ class DistillationTrainer:
                 batch = texts[start:start + batch_size]
                 embeddings.append(self.student_model.encode_base_embeddings(batch).cpu())
         return torch.cat(embeddings, dim=0).to(self.device)
+
+    def build_teacher_neighbor_index(self, base_embedding_cache, top_k=8, far_k=32):
+        """Precompute teacher top-k neighbors and far negatives from MiniLM geometry."""
+        with torch.no_grad():
+            teacher_unit = F.normalize(base_embedding_cache, p=2, dim=1)
+            similarity = teacher_unit @ teacher_unit.T
+            similarity.fill_diagonal_(-1.0)
+            top_count = min(top_k, similarity.shape[1] - 1)
+            far_count = min(far_k, similarity.shape[1] - 1)
+            top_indices = torch.topk(similarity, k=top_count, dim=1).indices.cpu().tolist()
+            far_indices = torch.topk(-similarity, k=far_count, dim=1).indices.cpu().tolist()
+        return {"top": top_indices, "far": far_indices}
+
+    def mine_student_hard_negatives(self, base_embedding_cache, labels=None, top_k=16):
+        """Find examples the current 3D student places close despite teacher/topic mismatch."""
+        self.student_model.eval()
+        with torch.no_grad():
+            r, theta, phi, _, _ = self.student_model.forward_embeddings(base_embedding_cache)
+            student_vectors = self.student_model.spherical_to_cartesian(r, theta, phi)
+            student_unit = F.normalize(student_vectors, p=2, dim=1)
+            similarity = student_unit @ student_unit.T
+            similarity.fill_diagonal_(-1.0)
+            near_indices = torch.topk(similarity, k=min(top_k * 3, similarity.shape[1] - 1), dim=1).indices.cpu().tolist()
+
+        mined = []
+        for anchor_idx, candidates in enumerate(near_indices):
+            if labels is None:
+                mined.append(candidates[:top_k])
+                continue
+            mismatched = [idx for idx in candidates if labels[idx] != labels[anchor_idx]]
+            mined.append((mismatched or candidates)[:top_k])
+        return mined
+
+    def generate_retrieval_groups(self, teacher_neighbors, num_groups, positives=4, negatives=12, mined_negatives=None):
+        """Build listwise retrieval groups: anchor plus teacher positives, far negatives, and mined hard negatives."""
+        groups = []
+        num_texts = len(teacher_neighbors["top"])
+        for _ in range(num_groups):
+            anchor_idx = random.randint(0, num_texts - 1)
+            positive_pool = teacher_neighbors["top"][anchor_idx]
+            far_pool = teacher_neighbors["far"][anchor_idx]
+            mined_pool = mined_negatives[anchor_idx] if mined_negatives else []
+            pos = random.sample(positive_pool, k=min(positives, len(positive_pool)))
+            mixed_neg_pool = list(dict.fromkeys(mined_pool + far_pool))
+            neg = random.sample(mixed_neg_pool, k=min(negatives, len(mixed_neg_pool)))
+            candidates = list(dict.fromkeys(pos + neg))
+            if candidates:
+                groups.append((anchor_idx, candidates))
+        return groups
         
     def train_step(self, batch_pairs, base_embedding_cache, optimizer, label_cache=None):
         self.student_model.train()
@@ -231,6 +281,65 @@ class DistillationTrainer:
         optimizer.step()
         
         return total_loss.item(), avg_teacher_cosine.item()
+
+    def train_retrieval_step(
+        self,
+        groups,
+        base_embedding_cache,
+        optimizer,
+        label_cache=None,
+        temperature=0.08,
+        prototype_weight=0.1,
+    ):
+        self.student_model.train()
+        optimizer.zero_grad()
+
+        losses = []
+        supervised_losses = []
+        prototype_losses = []
+        for anchor_idx, candidate_indices in groups:
+            indices = torch.tensor([anchor_idx] + candidate_indices, dtype=torch.long, device=self.device)
+            base_embeddings = base_embedding_cache.index_select(0, indices)
+            r, theta, phi, base_embeddings, reconstructed_embeddings = self.student_model.forward_embeddings(base_embeddings)
+            teacher_unit = F.normalize(base_embeddings.detach(), p=2, dim=1)
+            spherical = self.student_model.spherical_to_cartesian(r, theta, phi)
+            spherical_unit = F.normalize(spherical, p=2, dim=1)
+            recon_unit = F.normalize(reconstructed_embeddings, p=2, dim=1)
+
+            teacher_scores = (teacher_unit[0:1] @ teacher_unit[1:].T).squeeze(0)
+            student_scores = (spherical_unit[0:1] @ spherical_unit[1:].T).squeeze(0)
+            recon_scores = (recon_unit[0:1] @ recon_unit[1:].T).squeeze(0)
+
+            teacher_distribution = F.softmax(teacher_scores / temperature, dim=0)
+            student_log_distribution = F.log_softmax(student_scores / temperature, dim=0)
+            recon_log_distribution = F.log_softmax(recon_scores / temperature, dim=0)
+            listwise_loss = F.kl_div(student_log_distribution, teacher_distribution, reduction="batchmean")
+            recon_listwise_loss = F.kl_div(recon_log_distribution, teacher_distribution, reduction="batchmean")
+            embedding_loss = F.mse_loss(reconstructed_embeddings, base_embeddings.detach())
+            losses.append(listwise_loss + 0.5 * recon_listwise_loss + 0.1 * embedding_loss)
+
+            if label_cache is not None and self.topic_classifier is not None:
+                label_targets = label_cache.index_select(0, indices)
+                supervised_losses.append(F.cross_entropy(self.topic_classifier(spherical_unit), label_targets))
+
+            if label_cache is not None and self.topic_prototypes is not None:
+                label_targets = label_cache.index_select(0, indices)
+                prototypes = F.normalize(self.topic_prototypes, p=2, dim=1)
+                prototype_scores = spherical_unit @ prototypes.T
+                prototype_losses.append(F.cross_entropy(prototype_scores / 0.12, label_targets))
+
+        if not losses:
+            return 0.0, 0.0
+
+        total_loss = torch.stack(losses).mean()
+        if supervised_losses:
+            total_loss = total_loss + 0.15 * torch.stack(supervised_losses).mean()
+        if prototype_losses:
+            total_loss = total_loss + prototype_weight * torch.stack(prototype_losses).mean()
+
+        total_loss.backward()
+        optimizer.step()
+        return total_loss.item(), 0.0
     
     def train(
         self,
@@ -243,6 +352,10 @@ class DistillationTrainer:
         labels=None,
         checkpoint_dir=None,
         checkpoint_every=0,
+        retrieval_distillation=False,
+        teacher_top_k=8,
+        mined_hard_negatives=False,
+        prototype_loss=False,
     ):
         label_cache = None
         optimizer_params = (
@@ -256,6 +369,10 @@ class DistillationTrainer:
             self.topic_classifier = nn.Linear(3, len(label_names)).to(self.device)
             optimizer_params += list(self.topic_classifier.parameters())
             print(f"Using supervised topic separation with {len(label_names)} labels")
+            if prototype_loss:
+                self.topic_prototypes = nn.Parameter(torch.randn(len(label_names), 3, device=self.device))
+                optimizer_params.append(self.topic_prototypes)
+                print("Using topic prototype loss")
 
         optimizer = torch.optim.Adam(
             optimizer_params,
@@ -269,22 +386,49 @@ class DistillationTrainer:
         print("Precomputing frozen MiniLM embeddings...")
         base_embedding_cache = self.precompute_base_embeddings(texts)
         history = []
+        teacher_neighbors = None
+        mined_negatives = None
+        if retrieval_distillation:
+            print("Building teacher top-k retrieval neighborhoods...")
+            teacher_neighbors = self.build_teacher_neighbor_index(base_embedding_cache, top_k=teacher_top_k)
         
         for epoch in range(num_epochs):
             print(f"\nGenerating training pairs for epoch {epoch+1}...")
             num_pairs = pairs_per_epoch or min(20000, len(texts) * 2)
-            if epoch == 0:
+            if retrieval_distillation:
+                if mined_hard_negatives:
+                    print("Mining student hard negatives...")
+                    mined_negatives = self.mine_student_hard_negatives(base_embedding_cache, labels=labels)
+                training_groups = self.generate_retrieval_groups(
+                    teacher_neighbors,
+                    num_groups=num_pairs,
+                    positives=min(teacher_top_k, 4),
+                    negatives=12,
+                    mined_negatives=mined_negatives,
+                )
+            elif epoch == 0:
                 print("Building semantic pair index...")
                 pair_index = self.build_pair_index(texts, n_jobs=pair_workers)
-            training_pairs = self.generate_pairs(texts, pair_index, num_pairs_per_epoch=num_pairs, labels=labels)
+            if not retrieval_distillation:
+                training_pairs = self.generate_pairs(texts, pair_index, num_pairs_per_epoch=num_pairs, labels=labels)
             
             total_loss = 0.0
             total_teacher_cosine = 0.0
             num_batches = 0
             
-            for i in range(0, len(training_pairs), batch_size):
-                batch_pairs = training_pairs[i:i+batch_size]
-                loss, teacher_cosine = self.train_step(batch_pairs, base_embedding_cache, optimizer, label_cache=label_cache)
+            training_items = training_groups if retrieval_distillation else training_pairs
+            for i in range(0, len(training_items), batch_size):
+                batch_items = training_items[i:i+batch_size]
+                if retrieval_distillation:
+                    loss, teacher_cosine = self.train_retrieval_step(
+                        batch_items,
+                        base_embedding_cache,
+                        optimizer,
+                        label_cache=label_cache,
+                        prototype_weight=0.1 if prototype_loss else 0.0,
+                    )
+                else:
+                    loss, teacher_cosine = self.train_step(batch_items, base_embedding_cache, optimizer, label_cache=label_cache)
                 total_loss += loss
                 total_teacher_cosine += teacher_cosine
                 num_batches += 1
