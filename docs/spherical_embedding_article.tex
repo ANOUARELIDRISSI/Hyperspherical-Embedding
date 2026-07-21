@@ -14,7 +14,7 @@
 \maketitle
 
 \begin{abstract}
-This note studies whether a sentence embedding model can be distilled from a 384-dimensional MiniLM teacher into a compact 3D spherical representation for retrieval-augmented generation. A naive pairwise distillation objective produced severe semantic collisions in chunked FAISS retrieval. We improved the 3D student by training it as a retrieval ranking model: teacher top-$k$ neighborhoods define the desired local structure, listwise KL divergence transfers ranking distributions, and student-mined hard negatives target collisions found in the 3D space. On a controlled chunked topic benchmark, the best compact run improved spherical retrieval from $P@5=0.467$ to $P@5=0.817$, while the 384D teacher remained at $P@5=1.000$.
+This note studies whether a sentence embedding model can be distilled from a 384-dimensional MiniLM teacher into a compact 3D spherical representation for retrieval-augmented generation. A naive pairwise distillation objective produced severe semantic collisions in chunked FAISS retrieval. We improved the 3D student by training it as a retrieval ranking model: teacher top-$k$ neighborhoods define the desired local structure, listwise KL divergence transfers ranking distributions, and student-mined hard negatives target collisions found in the 3D space. We then replaced the plain coordinate MLP with a residual encoder and separate radius/angle heads. On a controlled chunked topic benchmark, the best run improved spherical retrieval from $P@5=0.467$ to $P@5=0.992$, while the 384D teacher remained at $P@5=1.000$.
 \end{abstract}
 
 \section{Motivation}
@@ -71,6 +71,21 @@ After each epoch, the current 3D student retrieves its nearest neighbors. If exa
 \subsection{Optional Topic Prototype Loss}
 An optional prototype loss was also implemented. Each topic receives a learned 3D prototype, and examples are encouraged to classify against those prototypes. In compact tests, this made results worse, likely because the prototype objective over-constrained the tiny 3D space. It remains useful for future ablations, but the best observed run did not use it.
 
+\section{Residual Separate-Head Encoder}
+The first student used a plain multilayer perceptron that mapped MiniLM embeddings directly to three raw coordinate values. This made the 3D bottleneck too brittle. The improved encoder uses LayerNorm, GELU activations, residual blocks, and separate coordinate heads:
+\[
+t_i \rightarrow h_i \rightarrow
+\left(
+r_i,\theta_i,\phi_i
+\right).
+\]
+The radius head is independent from the angle head:
+\begin{align}
+r_i &= \operatorname{softplus}(f_r(h_i)) + \epsilon,\\
+(\theta_i,\phi_i) &= f_a(h_i).
+\end{align}
+Angles are bounded with sigmoid transforms, while radius remains flexible. This separation lets radius learn a different signal from angular position instead of forcing one small linear head to entangle all coordinate roles.
+
 \section{Chunked RAG Benchmark}
 The evaluation builds two FAISS indexes over the same chunked documents:
 \begin{itemize}
@@ -90,11 +105,13 @@ Method & Precision@5 & MRR \\
 Initial 3D smoke checkpoint & 0.467 & 0.569 \\
 Pairwise + supervised topics & 0.717 & 0.781 \\
 Retrieval distillation + mined negatives & \textbf{0.817} & \textbf{0.883} \\
+Residual separate-head encoder + retrieval distillation & \textbf{0.967} & \textbf{1.000} \\
+Longer residual run, 256 sentences, 24 epochs & \textbf{0.992} & \textbf{1.000} \\
 Longer retrieval run, 256 sentences & 0.725 & 0.743 \\
 Retrieval distillation + prototype loss & 0.692 & 0.719 \\
 \bottomrule
 \end{tabular}
-\caption{Chunked dual-FAISS benchmark. The best 3D result used teacher top-$k$ neighborhoods, listwise KL ranking, topic supervision, and mined hard negatives, without prototype loss.}
+\caption{Chunked dual-FAISS benchmark. The best 3D result used the residual separate-head encoder, teacher top-$k$ neighborhoods, listwise KL ranking, topic supervision, and mined hard negatives, without prototype loss.}
 \end{table}
 
 The best compact command was:
@@ -111,12 +128,14 @@ First, the vector database was not the main bottleneck. FAISS over normalized 3D
 
 Second, retrieval-focused distillation is substantially better than naive pairwise distillation for a very small student. The jump from $P@5=0.467$ to $P@5=0.817$ suggests that the student should be trained for ranking behavior, not full teacher reconstruction.
 
-Third, longer training is not automatically better. A longer run on 256 sentences reduced the training loss but lowered benchmark quality. This suggests the global 3D space can overfit or rotate topic clusters in ways that look good to the training loss but hurt held-out chunked retrieval.
+Third, architecture matters. Replacing the plain MLP with a residual encoder and separate radius/angle heads increased the best compact result to $P@5=0.967$ and $MRR=1.000$. A longer residual run reached $P@5=0.992$ and $MRR=1.000$. This suggests the 3D bottleneck needs a stronger nonlinear folding function, not just a stronger loss.
+
+Fourth, longer training is not automatically better. A longer run on 256 sentences reduced the training loss but lowered benchmark quality. This suggests the global 3D space can overfit or rotate topic clusters in ways that look good to the training loss but hurt held-out chunked retrieval.
 
 \section{Limitations}
 This is still a controlled synthetic benchmark. The teacher reaches perfect performance, so the benchmark is useful for debugging the student but not sufficient for publication-level generality. The next step should test real corpora and compare against dimensionality-reduction baselines such as PCA or random projection.
 
-The 3D space also still misses some query types. Even the best run has collisions, especially for broad or mixed queries. This is expected from the small number of degrees of freedom.
+The 3D space can still miss some query types, especially broad or mixed queries. This is expected from the small number of degrees of freedom, although the residual separate-head encoder reduced collisions substantially on the controlled benchmark.
 
 \section{Future Work}
 Promising next directions include:
