@@ -36,9 +36,9 @@ class RAGSystem:
         r, theta, phi, base_embeddings, reconstructed_embeddings = self.model(documents)
         
         if self.mode == "spherical":
-            embeddings = self.model.spherical_to_cartesian(r, theta, phi).detach().numpy()
+            embeddings = self.model.spherical_to_cartesian(r, theta, phi).detach().cpu().numpy()
         else:
-            embeddings = reconstructed_embeddings.detach().numpy()
+            embeddings = reconstructed_embeddings.detach().cpu().numpy()
         
         # Add to FAISS index
         self.index.add(embeddings.astype(np.float32))
@@ -48,9 +48,9 @@ class RAGSystem:
         r, theta, phi, base_embeddings, reconstructed_embeddings = self.model([query])
         
         if self.mode == "spherical":
-            query_embedding = self.model.spherical_to_cartesian(r, theta, phi).detach().numpy()
+            query_embedding = self.model.spherical_to_cartesian(r, theta, phi).detach().cpu().numpy()
         else:
-            query_embedding = reconstructed_embeddings.detach().numpy()
+            query_embedding = reconstructed_embeddings.detach().cpu().numpy()
         
         distances, indices = self.index.search(query_embedding.astype(np.float32), k)
         

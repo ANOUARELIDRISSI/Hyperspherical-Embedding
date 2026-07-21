@@ -39,7 +39,7 @@ class DistillationTrainer:
             # Encode corpus with student spherical embeddings
             r, theta, phi, _, _ = self.student_model(corpus)
             corpus_emb = self.student_model.spherical_to_cartesian(r, theta, phi)
-            corpus_emb = F.normalize(corpus_emb, p=2, dim=1).numpy().astype(np.float32)
+            corpus_emb = F.normalize(corpus_emb, p=2, dim=1).detach().cpu().numpy().astype(np.float32)
             
             # Build FAISS index
             index = faiss.IndexFlatL2(3)
@@ -51,7 +51,7 @@ class DistillationTrainer:
             for query, relevant_idx in query_set:
                 r_q, theta_q, phi_q, _, _ = self.student_model([query])
                 q_emb = self.student_model.spherical_to_cartesian(r_q, theta_q, phi_q)
-                q_emb = F.normalize(q_emb, p=2, dim=1).numpy().astype(np.float32)
+                q_emb = F.normalize(q_emb, p=2, dim=1).detach().cpu().numpy().astype(np.float32)
                 
                 _, indices = index.search(q_emb, 10)
                 retrieved_indices = indices[0]
