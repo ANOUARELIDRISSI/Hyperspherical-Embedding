@@ -5,14 +5,16 @@ from src.real_data_loader import load_labeled_corpus, load_real_corpus
 from src.distillation import DistillationTrainer
 from src.spherical_embedding import SphericalEmbeddingModel
 from src.rag import RAGSystem
+import torch
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train the spherical embedding model on CPU.")
+    parser = argparse.ArgumentParser(description="Train the spherical embedding model.")
     parser.add_argument("--sentences", type=int, default=50000)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--threads", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     parser.add_argument("--pair-workers", type=int, default=-1)
     parser.add_argument("--pairs-per-epoch", type=int, default=None)
@@ -30,6 +32,14 @@ def main():
     print("=== Spherical Embedding RAG Training ===")
     print("=" * 50)
     print(f"CPU threads: {args.threads}")
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    elif args.device == "cuda" and not torch.cuda.is_available():
+        print("CUDA requested but not available; falling back to CPU")
+        device = "cpu"
+    else:
+        device = args.device
+    print(f"Device: {device}")
     
     # Step 1: Load real-world corpus
     print("\n1. Loading training corpus...")
@@ -44,7 +54,7 @@ def main():
     
     # Step 2: Initialize trainer
     print("\n2. Initializing distillation trainer...")
-    trainer = DistillationTrainer(num_threads=args.threads)
+    trainer = DistillationTrainer(num_threads=args.threads, device=device)
     
     # Step 3: Train model
     print("\n3. Starting training with contrastive pairwise objective...")
