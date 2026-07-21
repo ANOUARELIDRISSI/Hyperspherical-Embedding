@@ -232,7 +232,18 @@ class DistillationTrainer:
         
         return total_loss.item(), avg_teacher_cosine.item()
     
-    def train(self, texts, num_epochs=50, learning_rate=1e-3, batch_size=32, pair_workers=-1, pairs_per_epoch=None, labels=None):
+    def train(
+        self,
+        texts,
+        num_epochs=50,
+        learning_rate=1e-3,
+        batch_size=32,
+        pair_workers=-1,
+        pairs_per_epoch=None,
+        labels=None,
+        checkpoint_dir=None,
+        checkpoint_every=0,
+    ):
         label_cache = None
         optimizer_params = (
             list(self.student_model.encoder.parameters()) +
@@ -257,6 +268,7 @@ class DistillationTrainer:
         eval_query_set = [(text, idx) for idx, text in enumerate(eval_texts[:50])]
         print("Precomputing frozen MiniLM embeddings...")
         base_embedding_cache = self.precompute_base_embeddings(texts)
+        history = []
         
         for epoch in range(num_epochs):
             print(f"\nGenerating training pairs for epoch {epoch+1}...")
@@ -288,6 +300,18 @@ class DistillationTrainer:
             print(f"Recall@10 ........ {recall_at_10*100:.1f}%")
             print(f"MRR .............. {mrr:.3f}")
             print("-" * 40)
+            history.append({
+                "epoch": epoch + 1,
+                "loss": avg_loss,
+                "teacher_cosine": avg_teacher_cosine,
+                "recall_at_10": recall_at_10,
+                "mrr": mrr,
+            })
+            if checkpoint_dir and checkpoint_every and (epoch + 1) % checkpoint_every == 0:
+                checkpoint_path = os.path.join(checkpoint_dir, f"spherical_embedding_epoch_{epoch + 1}.pt")
+                self.save_student_model(checkpoint_path)
+
+        return history
     
     def save_student_model(self, path="models/spherical_embedding_model.pt"):
         os.makedirs(os.path.dirname(path), exist_ok=True)

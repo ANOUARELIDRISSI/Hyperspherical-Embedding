@@ -62,6 +62,11 @@ Train the 3D model with labeled topic separation:
 uv run python train.py --sentences 128 --epochs 14 --batch-size 32 --pairs-per-epoch 512 --skip-rag-test --supervised-topics
 ```
 
+Longer supervised run with checkpoints:
+```bash
+uv run python train.py --sentences 512 --epochs 40 --batch-size 64 --pairs-per-epoch 1024 --threads 7 --pair-workers -1 --skip-rag-test --supervised-topics --checkpoint-dir models/checkpoints --checkpoint-every 10
+```
+
 ## Notes
 - Training now mines positives and hard negatives with TF-IDF nearest neighbors instead of using random adjacent sentences.
 - The frozen MiniLM base model is reused as the teacher signal during each student forward pass, avoiding a second teacher encode per batch.

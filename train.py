@@ -18,6 +18,8 @@ def main():
     parser.add_argument("--pairs-per-epoch", type=int, default=None)
     parser.add_argument("--skip-rag-test", action="store_true")
     parser.add_argument("--supervised-topics", action="store_true")
+    parser.add_argument("--checkpoint-dir", default=None)
+    parser.add_argument("--checkpoint-every", type=int, default=0)
     args = parser.parse_args()
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 
@@ -42,7 +44,7 @@ def main():
     
     # Step 3: Train model
     print("\n3. Starting training with contrastive pairwise objective...")
-    trainer.train(
+    history = trainer.train(
         training_texts,
         num_epochs=args.epochs,
         batch_size=args.batch_size,
@@ -50,7 +52,12 @@ def main():
         pair_workers=args.pair_workers,
         pairs_per_epoch=args.pairs_per_epoch,
         labels=labels,
+        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_every=args.checkpoint_every,
     )
+    if history:
+        best = min(history, key=lambda item: item["loss"])
+        print(f"\nBest training loss: {best['loss']:.3f} at epoch {best['epoch']}")
     
     # Step 4: Save model
     print("\n4. Saving trained model...")
